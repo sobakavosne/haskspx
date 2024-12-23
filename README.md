@@ -1,0 +1,2 @@
+# haskspx
+SPHINCS+ Haskell bindings
