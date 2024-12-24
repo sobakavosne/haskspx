@@ -1,109 +1,126 @@
+{-# LANGUAGE InstanceSigs      #-}
 {-# LANGUAGE OverloadedStrings #-}
+{-# OPTIONS_GHC -Wno-orphans #-}
 
 module SPXBindingsSpec
   ( spec
   ) where
 
-import           Control.Monad   (replicateM)
 import           Data.Bits       (xor)
-import           Data.ByteString as BS (pack, replicate)
+import           Data.ByteString (ByteString, unpack)
 import qualified Data.ByteString as BS
+import           Data.Maybe      (fromJust)
+import           GHC.IO.Unsafe   (unsafePerformIO)
 import           SPXBindings     (cryptoSignBytes, cryptoSignPublicKeyBytes,
                                   cryptoSignSecretKeyBytes, cryptoSignSeedBytes,
                                   generateKeypair, sign, verify)
-import           Test.Hspec      (Spec, describe, expectationFailure, it,
-                                  shouldBe, shouldSatisfy)
+import           Test.Hspec      (Spec, describe, it, shouldBe)
+import           Test.QuickCheck (Arbitrary (arbitrary), Gen,
+                                  Testable (property), vectorOf, (==>))
+
+instance Arbitrary ByteString where
+  arbitrary :: Gen ByteString
+  arbitrary = do
+    let seedSize = unsafePerformIO cryptoSignSeedBytes
+    bytes <- vectorOf seedSize arbitrary
+    return $ BS.pack bytes
 
 spec :: Spec
-spec = do
-  describe "SPXBindings Sizes" $ do
-    it "cryptoSignBytes returns correct size" testCryptoSignBytes
-    it
-      "cryptoSignSecretKeyBytes returns correct size"
-      testCryptoSignSecretKeyBytes
-    it
-      "cryptoSignPublicKeyBytes returns correct size"
-      testCryptoSignPublicKeyBytes
-    it "cryptoSignSeedBytes returns correct size" testCryptoSignSeedBytes
-  describe "SPXBindings Keypair and Signing" $ do
-    it "Key generation produces valid keys" testKeyGeneration
-    it "Signing and verifying a message works" testSignVerify
-    it "Verifying with an invalid signature fails" testInvalidSignature
-    it "Signing and verifying a long message works" testLongMessage
+spec =
+  describe "SPHINCS+ Binding Tests" $ do
+    it "Returns correct sizes for keys and signature" $ do
+      let sizes = (fromJust . lookup activeParamSet) expectedSizes
+      pkSize <- cryptoSignPublicKeyBytes
+      skSize <- cryptoSignSecretKeyBytes
+      sigSize <- cryptoSignBytes
+      seedSize <- cryptoSignSeedBytes
+      pkSize `shouldBe` head sizes
+      skSize `shouldBe` sizes !! 1
+      sigSize `shouldBe` sizes !! 2
+      seedSize `shouldBe` 48
+    it "Generates valid keypair" $
+      property $ \seed ->
+        BS.length seed ==
+        unsafePerformIO cryptoSignSeedBytes ==>
+        case unsafePerformIO $ generateKeypair seed of
+          Left _ -> False
+          Right (pub, sec) ->
+            BS.length pub == unsafePerformIO cryptoSignPublicKeyBytes &&
+            BS.length sec == unsafePerformIO cryptoSignSecretKeyBytes
+    it "Signs and verifies a message correctly" $
+      property $ \seed message ->
+        let validSeed = BS.length seed == unsafePerformIO cryptoSignSeedBytes
+            validMessage = BS.length message > 0
+         in validSeed &&
+            validMessage ==>
+            case unsafePerformIO $ generateKeypair seed of
+              Left _ -> False
+              Right (pub, sec) ->
+                case unsafePerformIO $ sign message sec of
+                  Left _ -> False
+                  Right sig ->
+                    unsafePerformIO (verify message sig pub) == Right True
+    it "Fails to verify corrupted signatures" $ do
+      seed <- randomSeed
+      case unsafePerformIO $ generateKeypair seed of
+        Left _ -> False `shouldBe` True
+        Right (pub, sec) -> do
+          let message = BS.pack [1, 2, 3, 4]
+          case unsafePerformIO $ sign message sec of
+            Left _ -> False `shouldBe` True
+            Right sig -> do
+              let corruptedSig = BS.pack $ map (`xor` 0xFF) (unpack sig)
+              valid <- verify message corruptedSig pub
+              valid `shouldBe` Right False
+    it "Handles large messages" $ do
+      seed <- randomSeed
+      case unsafePerformIO $ generateKeypair seed of
+        Left _ -> False `shouldBe` True
+        Right (pub, sec) -> do
+          let message = BS.replicate (2 ^ (20 :: Integer)) 0xAA
+          case unsafePerformIO $ sign message sec of
+            Left _ -> False `shouldBe` True
+            Right sig -> do
+              result <- verify message sig pub
+              result `shouldBe` Right True
+    it "Fails on invalid seed length" $ do
+      let seed = BS.replicate 5 0xFF -- Incorrect length
+      let result = unsafePerformIO $ generateKeypair seed
+      result `shouldBe` Left "Invalid seed length"
+    it "Fails on invalid signature length" $ do
+      seed <- randomSeed
+      case unsafePerformIO $ generateKeypair seed of
+        Left _ -> False `shouldBe` True
+        Right (pub, _) -> do
+          let message = BS.pack [1, 2, 3, 4]
+          let sig = BS.pack [0x01, 0x02] -- Incorrect length
+          valid <- verify message sig pub
+          valid `shouldBe` Right False
+    it "Verifies expected sizes for parameter sets" $ do
+      let sizes = (fromJust . lookup activeParamSet) expectedSizes
+      pkSize <- cryptoSignPublicKeyBytes
+      skSize <- cryptoSignSecretKeyBytes
+      sigSize <- cryptoSignBytes
+      pkSize `shouldBe` head sizes
+      skSize `shouldBe` sizes !! 1
+      sigSize `shouldBe` sizes !! 2
 
--- Utility function to handle errors in tests
-handleIOError :: IO (Either String a) -> (a -> IO ()) -> IO ()
-handleIOError action handler = do
-  result <- action
-  case result of
-    Left err    -> expectationFailure err
-    Right value -> handler value
+activeParamSet :: String
+activeParamSet = "shake_128f"
 
-testCryptoSignBytes :: IO ()
-testCryptoSignBytes = do
-  size <- cryptoSignBytes
-  size `shouldSatisfy` (> 0)
+expectedSizes :: [(String, [Int])]
+expectedSizes =
+  [ ("shake_128s", [32, 64, 7856])
+  , ("shake_128f", [32, 64, 17088])
+  , ("shake_192s", [48, 96, 16224])
+  , ("shake_192f", [48, 96, 35664])
+  , ("shake_256s", [64, 128, 29792])
+  , ("shake_256f", [64, 128, 49856])
+  , ("sha2_128s", [32, 64, 7856])
+  , ("sha2_128f", [32, 64, 17088])
+  ]
 
-testCryptoSignSecretKeyBytes :: IO ()
-testCryptoSignSecretKeyBytes = do
-  size <- cryptoSignSecretKeyBytes
-  size `shouldSatisfy` (> 0)
-
-testCryptoSignPublicKeyBytes :: IO ()
-testCryptoSignPublicKeyBytes = do
-  size <- cryptoSignPublicKeyBytes
-  size `shouldSatisfy` (> 0)
-
-testCryptoSignSeedBytes :: IO ()
-testCryptoSignSeedBytes = do
-  size <- cryptoSignSeedBytes
-  size `shouldSatisfy` (> 0)
-
-testKeyGeneration :: IO ()
-testKeyGeneration = do
-  seedBytes <- cryptoSignSeedBytes
-  seed <- BS.pack <$> replicateM seedBytes (pure 0x00)
-  handleIOError (generateKeypair seed) $ \(publicKey, secretKey) -> do
-    publicKeyBytes <- cryptoSignPublicKeyBytes
-    secretKeyBytes <- cryptoSignSecretKeyBytes
-    BS.length publicKey `shouldBe` publicKeyBytes
-    BS.length secretKey `shouldBe` secretKeyBytes
-
-testSignVerify :: IO ()
-testSignVerify = do
-  seedBytes <- cryptoSignSeedBytes
-  seed <- BS.pack <$> replicateM seedBytes (pure 0x01)
-  handleIOError (generateKeypair seed) $ \(publicKey, secretKey) -> do
-    let message = "Test message"
-    handleIOError
-      (sign (BS.pack $ map (fromIntegral . fromEnum) message) secretKey) $ \signature -> do
-      handleIOError
-        (verify
-           (BS.pack $ map (fromIntegral . fromEnum) message)
-           signature
-           publicKey) $ \isValid -> isValid `shouldBe` True
-
-testInvalidSignature :: IO ()
-testInvalidSignature = do
-  seedBytes <- cryptoSignSeedBytes
-  seed <- BS.pack <$> replicateM seedBytes (pure 0x02)
-  handleIOError (generateKeypair seed) $ \(publicKey, secretKey) -> do
-    let message = "Invalid signature test"
-    handleIOError
-      (sign (BS.pack $ map (fromIntegral . fromEnum) message) secretKey) $ \signature -> do
-      let invalidSignature = BS.map (`xor` 1) signature
-      handleIOError
-        (verify
-           (BS.pack $ map (fromIntegral . fromEnum) message)
-           invalidSignature
-           publicKey) $ \isValid -> isValid `shouldBe` False
-
-testLongMessage :: IO ()
-testLongMessage = do
-  seedBytes <- cryptoSignSeedBytes
-  seed <- BS.pack <$> replicateM seedBytes (pure 0x03)
-  handleIOError (generateKeypair seed) $ \(publicKey, secretKey) -> do
-    let message = BS.replicate (2 ^ (20 :: Int)) 0x42 -- 1 MB message
-    handleIOError (sign message secretKey) $ \signature -> do
-      handleIOError (verify message signature publicKey) $ \isValid ->
-        isValid `shouldBe` True
+randomSeed :: IO ByteString
+randomSeed = do
+  seedSize <- cryptoSignSeedBytes
+  return $ BS.replicate seedSize 0xAA
