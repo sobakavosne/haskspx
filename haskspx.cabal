@@ -1,0 +1,73 @@
+cabal-version:      3.6
+name:               haskspx
+version:            0.1.0.0
+synopsis:           SPHINCS+ Haskell bindings 
+homepage:           https://github.com/sobakavosne/haskspx
+license:            CC0-1.0
+license-file:       LICENSE
+author:             Λ
+maintainer:         sobakavsne@protonmail.com
+category:           Library
+build-type:         Custom
+extra-doc-files:
+  CHANGELOG.md
+  README.txt
+
+extra-source-files: Setup.hs
+
+custom-setup
+  setup-depends:
+    , base
+    , Cabal
+    , directory
+    , process
+
+common shared-deps
+  build-depends:
+    , base
+    , bytestring
+
+  default-language: Haskell2010
+  ghc-options:      -Wall
+
+library
+  import:          shared-deps
+  exposed-modules: SPXBindings
+  extra-libraries: crypto
+  cc-options:      -DPARAMS=sphincs-haraka-128f
+  hs-source-dirs:  src
+  include-dirs:    src/sphincsplus/ref
+  extra-lib-dirs:  ${pkgroot}/src/sphincsplus/ref
+  c-sources:
+    src/sphincsplus/ref/address.c
+    src/sphincsplus/ref/fors.c
+    src/sphincsplus/ref/haraka.c
+    src/sphincsplus/ref/hash_haraka.c
+    src/sphincsplus/ref/merkle.c
+    src/sphincsplus/ref/rng.c
+    src/sphincsplus/ref/sign.c
+    src/sphincsplus/ref/thash_haraka_robust.c
+    src/sphincsplus/ref/utils.c
+    src/sphincsplus/ref/utilsx1.c
+    src/sphincsplus/ref/wots.c
+    src/sphincsplus/ref/wotsx1.c
+
+executable haskspx
+  import:           shared-deps
+  main-is:          Main.hs
+  build-depends:    haskspx
+  hs-source-dirs:   app
+  default-language: Haskell2010
+
+test-suite haskspx-test
+  import:         shared-deps
+  type:           exitcode-stdio-1.0
+  hs-source-dirs: test
+  main-is:        Spec.hs
+  other-modules:  SPXBindingsSpec
+  build-depends:
+    , haskspx
+    , hspec
+    , hspec-discover
+    , QuickCheck
+    , random
